@@ -1,6 +1,9 @@
 package com.lg.zkdemo.watcher;
 
 import org.apache.zookeeper.*;
+import org.apache.zookeeper.AsyncCallback.DataCallback;
+import org.apache.zookeeper.AsyncCallback.StringCallback;
+import org.apache.zookeeper.KeeperException.Code;
 import org.apache.zookeeper.KeeperException.ConnectionLossException;
 import org.apache.zookeeper.KeeperException.NoNodeException;
 import org.apache.zookeeper.KeeperException.NodeExistsException;
@@ -107,11 +110,81 @@ public class Master implements Watcher {
         }
     }
 
+    /**
+     * 异步检查
+     */
+    void asyncCheckMaster(){
+        zk.getData("/master",false,masterCheckCallback,null);
+    }
+
+    /**
+     * 异步调用 竞争master
+     */
+    void asyncRunForMaster(){
+        zk.create("/master",serverID.getBytes(),OPEN_ACL_UNSAFE,CreateMode.EPHEMERAL,masterCreateCallback,null);
+    }
+
+    public boolean isLeader() {
+        return isLeader;
+    }
+
+    /**
+     * 异步创建Master node回调
+     */
+    StringCallback masterCreateCallback = new StringCallback() {
+        @Override
+        public void processResult(int rc, String path, Object ctx, String name) {
+            switch (Code.get(rc)){
+                case CONNECTIONLOSS:
+                    checkMaster();
+                    return;
+                case OK:
+                    isLeader = true;
+                    break;
+                default:
+                    isLeader = false;
+            }
+
+            System.out.println("I'm " + (isLeader ? "" : "not ") +
+                    "the leader");
+        }
+    };
+
+    /**
+     * 异步获取znode回调
+     */
+    DataCallback masterCheckCallback = new DataCallback() {
+        @Override
+        public void processResult(int rc, String path, Object ctx, byte[] data, Stat stat) {
+            switch (Code.get(rc)){
+                case CONNECTIONLOSS:
+                    asyncCheckMaster();
+                    return;
+                case NONODE:
+                    asyncRunForMaster();
+                    return;
+            }
+        }
+    };
+
     public static void main(String[] args) throws Exception {
-        Master master = new Master("192.168.190.133:2181");
+
+        if(args.length == 0){
+            System.err
+                    .println("缺少ZK的hostPort");
+            System.exit(2);
+        }
+        Master master = new Master(args[0]);
         master.startZK();
 
-        TimeUnit.SECONDS.sleep(60);
+        master.runForMaster();
+        if(master.isLeader()){
+            //logic
+            System.out.println("我是Master..");
+            TimeUnit.SECONDS.sleep(60);
+        }else {
+            System.out.println("其它是Master..");
+        }
 
         master.stopZK();
     }

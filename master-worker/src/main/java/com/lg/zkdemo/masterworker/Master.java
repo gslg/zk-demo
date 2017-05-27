@@ -261,7 +261,7 @@ public class Master implements Watcher {
             System.out.println("其它是Master..");
         }
 
-        TimeUnit.SECONDS.sleep(30);
+        TimeUnit.SECONDS.sleep(60);
 
         master.stopZK();
     }

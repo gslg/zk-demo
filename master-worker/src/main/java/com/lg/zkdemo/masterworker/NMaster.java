@@ -1,13 +1,11 @@
 package com.lg.zkdemo.masterworker;
 
 import org.apache.log4j.Logger;
-import org.apache.zookeeper.AsyncCallback.ChildrenCallback;
-import org.apache.zookeeper.AsyncCallback.DataCallback;
-import org.apache.zookeeper.AsyncCallback.StatCallback;
-import org.apache.zookeeper.AsyncCallback.StringCallback;
+import org.apache.zookeeper.AsyncCallback.*;
 import org.apache.zookeeper.*;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Random;
 
 import static org.apache.zookeeper.KeeperException.Code;
@@ -370,7 +368,7 @@ public class NMaster implements Watcher {
                 logger.info("Succesfully got a list of workers:"
                         +children.size()
                         +" workers.");
-                // TODO: 2017/5/26  重新分配设置任务
+                ressignAndSet(children);
                 break;
             default:
                 logger.error("GetChildren failed:"+KeeperException.create(Code.get(rc),path));
@@ -383,10 +381,179 @@ public class NMaster implements Watcher {
     };*/
 
     /**
+     * 重新分配设置子节点
+     * @param children
+     */
+   void ressignAndSet(List<String> children) {
+       //待处理的节点
+       List<String> toProcess;
+       if(worksCache == null){
+           worksCache = new ChildrenCache(children);
+           toProcess = null;
+       }else {
+           logger.info("Removing and Setting");
+           //获取已经不存在的workers
+           toProcess = worksCache.removedAndSet(children);
+       }
+
+       if(toProcess != null){
+           for(String worker : toProcess){
+               //获取消失workers的任务
+               getAbsentWorkerTasks(worker);
+           }
+       }
+
+    }
+
+    /**
+     * 获取已经不存在的Worker的任务
+     * @param worker
+     */
+    void getAbsentWorkerTasks(String worker) {
+        this.zk.getChildren("/assign/"+worker,false,workerAssignmentCallback,null);
+    }
+
+
+    ChildrenCallback workerAssignmentCallback = (rc, path, ctx, children) -> {
+        switch (Code.get(rc)){
+            case CONNECTIONLOSS:
+                getAbsentWorkerTasks(path);
+                break;
+            case OK:
+                logger.info("Succesfully got a list of assignments: "
+                        + children.size()
+                        + " tasks");
+                //对已经不存在的worker的任务进行重新分配
+                for(String task : children){
+                    getDataReassign(path+"/"+task,task);
+                }
+                break;
+            default:
+                logger.error("getChildren failed",  KeeperException.create(Code.get(rc), path));
+        }
+    };
+
+    /**
      * 获取workers
      */
     void getWorkers(){
         zk.getChildren("/workers",workersChangeWatcher,workersGetChildrenCallback,null);
     }
+
+    /*
+    ************************************************
+    * Recovery of tasks assigned to absent worker. *
+    ************************************************
+    */
+
+    /**
+     * 获取重新分配任务的数据
+     * @param path 待重新分配任务的路径
+     * @param task 不包括前缀的任务名
+     */
+    void getDataReassign(String path, String task) {
+        zk.getData(path,false,getDataReassignCallback,task);
+    }
+
+
+    /**
+     * Context for recreate operation.
+     *
+     */
+    class RecreateTaskCtx {
+        String path;
+        String task;
+        byte[] data;
+
+        RecreateTaskCtx(String path, String task, byte[] data) {
+            this.path = path;
+            this.task = task;
+            this.data = data;
+        }
+    }
+
+    DataCallback getDataReassignCallback = (rc, path, ctx, data, stat) -> {
+        switch (Code.get(rc)){
+            case CONNECTIONLOSS:
+                getDataReassign(path, (String) ctx);
+                break;
+            case OK:
+                //重新创建任务
+                recreateTask(new RecreateTaskCtx(path,(String) ctx,data));
+                break;
+            default:
+                logger.error("Something went wrong when getting data",KeeperException.create(Code.get(rc),path));
+        }
+    };
+
+    /**
+     * 在task节点下重新创建task节点
+     * @param ctx
+     */
+    void recreateTask(RecreateTaskCtx ctx) {
+        zk.create("/tasks/"+ctx.task,ctx.data,OPEN_ACL_UNSAFE,CreateMode.PERSISTENT,recreateTaskCallback,ctx);
+    }
+
+    StringCallback recreateTaskCallback = (rc, path, ctx, name) -> {
+        switch (Code.get(rc)){
+            case CONNECTIONLOSS:
+                recreateTask((RecreateTaskCtx) ctx);
+                break;
+            case OK:
+                //需要删除以前分配的
+                deleteAssignment(((RecreateTaskCtx) ctx).path);
+                break;
+            default:
+                logger.error("Something wwnt wrong when recreating task",
+                        KeeperException.create(Code.get(rc)));
+        }
+    };
+
+    /**
+     * 删除以前分配给已经不存在的worker的任务
+     * @param path
+     */
+    void deleteAssignment(String path){
+        zk.delete(path,-1,taskDeleteCallback,null);
+    }
+
+    VoidCallback taskDeleteCallback = (rc, path, ctx) -> {
+        switch(Code.get(rc)) {
+            case CONNECTIONLOSS:
+                deleteAssignment(path);
+                break;
+            case OK:
+                logger.info("Task correctly deleted: " + path);
+                break;
+            default:
+                logger.error("Failed to delete task data" +
+                        KeeperException.create(Code.get(rc), path));
+        }
+    };
+    /*VoidCallback taskDeleteCallback = new VoidCallback() {
+        @Override
+        public void processResult(int rc, String path, Object ctx) {
+            switch(Code.get(rc)) {
+                case CONNECTIONLOSS:
+                    deleteAssignment(path);
+                    break;
+                case OK:
+                    logger.info("Task correctly deleted: " + path);
+                    break;
+                default:
+                    logger.error("Failed to delete task data" +
+                            KeeperException.create(Code.get(rc), path));
+            }
+        }
+    };*/
+
+
+     /*
+     ******************************************************
+     ******************************************************
+     * Methods for receiving new tasks and assigning them.*
+     ******************************************************
+     ******************************************************
+     */
 
 }

@@ -397,10 +397,11 @@ public class NMaster implements Watcher {
        }
 
        if(toProcess != null){
-           for(String worker : toProcess){
+           toProcess.forEach(this::getAbsentWorkerTasks);
+          /* for(String worker : toProcess){
                //获取消失workers的任务
                getAbsentWorkerTasks(worker);
-           }
+           }*/
        }
 
     }
